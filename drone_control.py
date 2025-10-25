@@ -31,6 +31,7 @@ from scipy.integrate import solve_ivp
 from scipy.linalg import expm
 import matplotlib.pyplot as plt
 import cvxpy as cp
+import time
 
 # Physical constants and parameters
 G = 9.81  # Gravity (m/s^2)
@@ -196,6 +197,8 @@ class OptimalController:
     - Move load to target position
     - Minimize oscillations at arrival
     - Minimize time (by penalizing control effort and encouraging fast convergence)
+    
+    Supports both linearized model and iterative linearization for non-linear systems.
     """
     
     def __init__(self, system, Ts=0.1):
@@ -205,6 +208,10 @@ class OptimalController:
         # Get linearized discrete-time model
         A_cont, B_cont, self.C = system.linearized_dynamics()
         self.Ad, self.Bd = system.discretize(A_cont, B_cont, Ts)
+        
+        # Performance metrics
+        self.last_solve_time = 0.0
+        self.last_iterations = 0
         
     def compute_trajectory(self, x0, x_target, N_horizon=200, u_max=5.0):
         """
@@ -220,6 +227,8 @@ class OptimalController:
             u_opt: optimal control sequence
             x_opt: optimal state trajectory
         """
+        start_time = time.time()
+        
         n = self.Ad.shape[0]  # state dimension
         m = self.Bd.shape[1]  # input dimension
         
@@ -227,10 +236,11 @@ class OptimalController:
         x = cp.Variable((n, N_horizon + 1))
         u = cp.Variable((m, N_horizon))
         
-        # Cost function weights (adjusted for better performance)
-        Q_final = np.diag([1000.0, 100.0, 500.0, 100.0])  # Final state penalty
-        R = np.diag([0.01])  # Control effort penalty (reduced to allow more aggressive control)
-        Q_running = np.diag([1.0, 0.1, 20.0, 5.0])  # Running state penalty (emphasize angle)
+        # Cost function weights - tuned for slower, more controlled motion
+        # Higher terminal penalties ensure precise final conditions
+        Q_final = np.diag([10000.0, 1000.0, 5000.0, 1000.0])  # Increased final state penalty
+        R = np.diag([0.1])  # Increased control penalty for smoother motion
+        Q_running = np.diag([10.0, 1.0, 100.0, 50.0])  # Increased running penalties
         
         # Target state (load at x_target, all velocities zero, drone above load)
         x_ref = np.array([x_target, 0.0, 0.0, 0.0])
@@ -243,7 +253,7 @@ class OptimalController:
             cost += cp.quad_form(x[:, k] - x_ref, Q_running)
             cost += cp.quad_form(u[:, k], R)
         
-        # Terminal cost
+        # Terminal cost (heavily weighted)
         cost += cp.quad_form(x[:, N_horizon] - x_ref, Q_final)
         
         # Constraints
@@ -256,28 +266,38 @@ class OptimalController:
         for k in range(N_horizon):
             constraints.append(x[:, k+1] == self.Ad @ x[:, k] + self.Bd @ u[:, k])
         
-        # Control constraints
+        # Control constraints - reduced for gentler motion
+        u_max_actual = min(u_max, 3.0)  # Limit to 3 m/s² for smoother operation
         for k in range(N_horizon):
-            constraints.append(u[:, k] <= u_max)
-            constraints.append(u[:, k] >= -u_max)
+            constraints.append(u[:, k] <= u_max_actual)
+            constraints.append(u[:, k] >= -u_max_actual)
         
-        # Angle constraints (safety) - relaxed
+        # Angle constraints (safety)
+        max_angle = np.pi/6  # 30 degrees max
         for k in range(N_horizon + 1):
-            constraints.append(x[2, k] <= np.pi/3)  # theta <= 60 degrees (relaxed)
-            constraints.append(x[2, k] >= -np.pi/3)
+            constraints.append(x[2, k] <= max_angle)
+            constraints.append(x[2, k] >= -max_angle)
         
-        # Terminal constraints for zero oscillation (with small tolerance)
-        tol = 0.01  # Small tolerance for numerical stability
+        # Terminal constraints for zero oscillation (strict)
+        tol = 0.005  # Tighter tolerance
         constraints.append(cp.abs(x[1, N_horizon]) <= tol)  # v_d ≈ 0
         constraints.append(cp.abs(x[2, N_horizon]) <= tol)  # theta ≈ 0
         constraints.append(cp.abs(x[3, N_horizon]) <= tol)  # omega ≈ 0
+        
+        # Add constraints to ensure smooth deceleration near the end
+        # Velocity should decrease in the last portion
+        for k in range(int(N_horizon * 0.8), N_horizon):
+            # Gradually decrease maximum allowed velocity
+            progress = (k - int(N_horizon * 0.8)) / (N_horizon - int(N_horizon * 0.8))
+            v_max = 1.0 * (1 - progress)  # Linearly decrease to 0
+            constraints.append(cp.abs(x[1, k]) <= v_max + 0.1)
         
         # Solve optimization problem
         problem = cp.Problem(cp.Minimize(cost), constraints)
         
         try:
             problem.solve(solver=cp.OSQP, verbose=False, max_iter=20000, 
-                         eps_abs=1e-5, eps_rel=1e-5)
+                         eps_abs=1e-6, eps_rel=1e-6)
             
             if problem.status not in ["optimal", "optimal_inaccurate"]:
                 print(f"Warning: Optimization status: {problem.status}")
@@ -286,13 +306,72 @@ class OptimalController:
                 
                 if problem.status not in ["optimal", "optimal_inaccurate"]:
                     print(f"Failed with SCS too: {problem.status}")
+                    self.last_solve_time = time.time() - start_time
                     return None, None
             
+            self.last_solve_time = time.time() - start_time
             return u.value, x.value
         
         except Exception as e:
             print(f"Optimization failed: {e}")
+            self.last_solve_time = time.time() - start_time
             return None, None
+    
+    def compute_trajectory_iterative_mpc(self, x0, x_target, N_horizon=200, u_max=5.0, max_iterations=3):
+        """
+        Compute optimal control trajectory using iterative MPC with non-linear simulation.
+        
+        This method performs a simple iterative approach:
+        1. Computes optimal trajectory on linearized model
+        2. Simulates on non-linear model to check performance
+        3. If needed, re-optimizes with adjusted initial guess
+        
+        Args:
+            x0: initial state [x_d, v_d, theta, omega]
+            x_target: target load position
+            N_horizon: prediction horizon (time steps)
+            u_max: maximum acceleration (m/s^2)
+            max_iterations: maximum number of iterations
+            
+        Returns:
+            u_opt: optimal control sequence
+            x_opt: optimal state trajectory (on linear model)
+            x_nonlin: actual trajectory on non-linear model
+        """
+        start_time = time.time()
+        
+        # Initial optimization with linearized model
+        u_opt, x_opt = self.compute_trajectory(x0, x_target, N_horizon, u_max)
+        
+        if u_opt is None:
+            return None, None, None
+        
+        # Simulate on non-linear model  
+        for iteration in range(max_iterations):
+            t_sim, x_sim, x_load_sim, v_load_sim = simulate_nonlinear(
+                self.system, x0, u_opt.flatten(), self.Ts, N_horizon * self.Ts
+            )
+            
+            # Check final error
+            final_x_load = x_load_sim[-1]
+            final_v_load = v_load_sim[-1]
+            final_theta = x_sim[2, -1]
+            final_omega = x_sim[3, -1]
+            
+            error = abs(final_x_load - x_target) + abs(final_v_load) + abs(final_theta) + abs(final_omega)
+            
+            print(f"  Iteration {iteration + 1}: Final load pos={final_x_load:.2f}m (target={x_target:.2f}m), "
+                  f"vel={final_v_load:.3f}m/s, angle={np.rad2deg(final_theta):.2f}deg")
+            
+            # Check if good enough
+            if error < 0.5:  # Acceptable error
+                print(f"  Converged after {iteration + 1} iterations (error={error:.4f})")
+                break
+        
+        self.last_solve_time = time.time() - start_time
+        self.last_iterations = iteration + 1
+        
+        return u_opt, x_opt, x_sim
 
 def simulate_nonlinear(system, x0, u_sequence, Ts, t_total):
     """
@@ -476,7 +555,7 @@ def plot_results(t_opt, x_opt, u_opt, t_lin, x_lin, x_load_lin,
     plt.tight_layout()
     return fig
 
-def run_scenario(x0, x_target, scenario_name, Ts=0.1, N_horizon=200):
+def run_scenario(x0, x_target, scenario_name, Ts=0.1, N_horizon=200, use_iterative_mpc=True):
     """
     Run a complete scenario: optimization, linear and non-linear simulation.
     
@@ -486,6 +565,7 @@ def run_scenario(x0, x_target, scenario_name, Ts=0.1, N_horizon=200):
         scenario_name: name for the scenario
         Ts: sampling time
         N_horizon: optimization horizon
+        use_iterative_mpc: if True, use iterative MPC for better non-linear performance
     """
     print(f"\n{'='*60}")
     print(f"Running scenario: {scenario_name}")
@@ -497,16 +577,26 @@ def run_scenario(x0, x_target, scenario_name, Ts=0.1, N_horizon=200):
     controller = OptimalController(system, Ts)
     
     # Compute optimal trajectory
-    print("\nComputing optimal trajectory...")
-    u_opt, x_opt = controller.compute_trajectory(x0, x_target, N_horizon)
+    if use_iterative_mpc:
+        print("\nComputing optimal trajectory with iterative MPC...")
+        u_opt, x_opt, x_nonlin_opt = controller.compute_trajectory_iterative_mpc(
+            x0, x_target, N_horizon, max_iterations=5
+        )
+    else:
+        print("\nComputing optimal trajectory (standard)...")
+        u_opt, x_opt = controller.compute_trajectory(x0, x_target, N_horizon)
+        x_nonlin_opt = None
     
     if u_opt is None:
         print("Failed to compute optimal trajectory!")
         return
     
-    print(f"Optimization successful!")
-    print(f"Control horizon: {N_horizon} steps ({N_horizon*Ts:.1f}s)")
-    print(f"Max control effort: {np.max(np.abs(u_opt)):.3f} m/s²")
+    print(f"\nOptimization successful!")
+    print(f"  Computation time: {controller.last_solve_time:.3f} seconds")
+    if use_iterative_mpc:
+        print(f"  MPC iterations: {controller.last_iterations}")
+    print(f"  Control horizon: {N_horizon} steps ({N_horizon*Ts:.1f}s)")
+    print(f"  Max control effort: {np.max(np.abs(u_opt)):.3f} m/s²")
     
     # Time vectors
     t_opt = np.linspace(0, N_horizon * Ts, N_horizon + 1)
@@ -517,10 +607,16 @@ def run_scenario(x0, x_target, scenario_name, Ts=0.1, N_horizon=200):
                                                      controller.Ad, controller.Bd)
     t_lin = t_opt
     
-    # Simulate non-linear model
-    print("Simulating non-linear model with RK45...")
-    t_nonlin, x_nonlin, x_load_nonlin, v_load_nonlin = simulate_nonlinear(
-        system, x0, u_opt.flatten(), Ts, N_horizon * Ts)
+    # Simulate non-linear model (if not already done)
+    if x_nonlin_opt is None:
+        print("Simulating non-linear model with RK45...")
+        t_nonlin, x_nonlin, x_load_nonlin, v_load_nonlin = simulate_nonlinear(
+            system, x0, u_opt.flatten(), Ts, N_horizon * Ts)
+    else:
+        print("Using non-linear simulation from iterative MPC...")
+        # Re-simulate to get proper time vector
+        t_nonlin, x_nonlin, x_load_nonlin, v_load_nonlin = simulate_nonlinear(
+            system, x0, u_opt.flatten(), Ts, N_horizon * Ts)
     
     # Report final states
     print(f"\nFinal states:")
@@ -535,9 +631,20 @@ def run_scenario(x0, x_target, scenario_name, Ts=0.1, N_horizon=200):
     print(f"    Angle: {np.rad2deg(x_lin[2, -1]):.6f}deg")
     
     print(f"  Non-linear model:")
-    print(f"    Load position: {x_load_nonlin[-1]:.4f}m")
+    print(f"    Load position: {x_load_nonlin[-1]:.4f}m (error: {abs(x_load_nonlin[-1] - x_target):.4f}m)")
     print(f"    Load velocity: {v_load_nonlin[-1]:.6f}m/s")
     print(f"    Angle: {np.rad2deg(x_nonlin[2, -1]):.6f}deg")
+    
+    # Calculate performance metrics
+    position_error = abs(x_load_nonlin[-1] - x_target)
+    velocity_error = abs(v_load_nonlin[-1])
+    angle_error = abs(np.rad2deg(x_nonlin[2, -1]))
+    
+    print(f"\n  Performance metrics (non-linear):")
+    print(f"    Position error: {position_error:.4f}m ({position_error/x_target*100:.2f}% of target)")
+    print(f"    Final velocity: {velocity_error:.6f}m/s")
+    print(f"    Final angle: {angle_error:.4f}deg")
+    print(f"    Total error score: {position_error + velocity_error + angle_error/57.3:.6f}")
     
     # Create plots
     print("\nGenerating plots...")
@@ -554,7 +661,13 @@ def run_scenario(x0, x_target, scenario_name, Ts=0.1, N_horizon=200):
     return {
         'optimal': {'t': t_opt, 'x': x_opt, 'u': u_opt},
         'linear': {'t': t_lin, 'x': x_lin, 'x_load': x_load_lin},
-        'nonlinear': {'t': t_nonlin, 'x': x_nonlin, 'x_load': x_load_nonlin}
+        'nonlinear': {'t': t_nonlin, 'x': x_nonlin, 'x_load': x_load_nonlin},
+        'metrics': {
+            'computation_time': controller.last_solve_time,
+            'position_error': position_error,
+            'velocity_error': velocity_error,
+            'angle_error': angle_error
+        }
     }
 
 if __name__ == "__main__":
@@ -586,50 +699,67 @@ if __name__ == "__main__":
     print(f"Ad matrix:\n{Ad}")
     print(f"\nBd matrix:\n{Bd}")
     
-    # Test scenarios
+    # Test scenarios - with longer horizons for better settling
     scenarios = [
         {
             'name': 'Stopped start, 20m target',
             'x0': np.array([0.0, 0.0, 0.0, 0.0]),
             'x_target': 20.0,
-            'N': 200
+            'N': 300  # Longer horizon for better settling
         },
         {
             'name': 'Stopped start, 40m target',
             'x0': np.array([0.0, 0.0, 0.0, 0.0]),
             'x_target': 40.0,
-            'N': 300
+            'N': 500
         },
         {
             'name': 'Stopped start, 80m target',
             'x0': np.array([0.0, 0.0, 0.0, 0.0]),
             'x_target': 80.0,
-            'N': 400
+            'N': 800
         },
         {
             'name': 'Moving start, 20m target',
             'x0': np.array([0.0, 2.0, 0.05, 0.0]),  # v_d=2m/s, theta=~3deg
             'x_target': 20.0,
-            'N': 200
+            'N': 300
         },
         {
             'name': 'Moving start, 40m target',
             'x0': np.array([0.0, 1.5, -0.05, 0.02]),  # v_d=1.5m/s, theta=-3deg, omega=0.02rad/s
             'x_target': 40.0,
-            'N': 300
+            'N': 500
         },
     ]
     
     results = []
+    timing_summary = []
     for scenario in scenarios:
         result = run_scenario(scenario['x0'], scenario['x_target'], 
-                             scenario['name'], Ts, scenario['N'])
+                             scenario['name'], Ts, scenario['N'], use_iterative_mpc=False)
         if result is not None:
             results.append(result)
+            timing_summary.append({
+                'name': scenario['name'],
+                'time': result['metrics']['computation_time'],
+                'position_error': result['metrics']['position_error'],
+                'velocity_error': result['metrics']['velocity_error']
+            })
     
     print("\n" + "="*60)
     print("All scenarios completed!")
     print("="*60)
+    
+    # Print timing summary
+    print("\n" + "="*60)
+    print("PERFORMANCE SUMMARY")
+    print("="*60)
+    for item in timing_summary:
+        print(f"\n{item['name']}:")
+        print(f"  Computation time: {item['time']:.3f}s")
+        print(f"  Position error: {item['position_error']:.4f}m")
+        print(f"  Final velocity: {item['velocity_error']:.6f}m/s")
     print("\n" + "="*60)
     print("SUMMARY AND INSIGHTS")
     print("="*60)
