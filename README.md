@@ -100,6 +100,8 @@ pip install -r requirements.txt
 
 ## Usage
 
+### Run All Test Scenarios
+
 ```bash
 python drone_control.py
 ```
@@ -113,6 +115,18 @@ This will:
    - Linear model response
    - Non-linear model response
    - Comparison between models
+
+### Run a Single Scenario
+
+```bash
+python example.py
+```
+
+This simpler example demonstrates how to:
+- Set up a custom scenario
+- Compute optimal trajectory
+- Simulate on both linear and non-linear models
+- Generate a basic comparison plot
 
 ## Output
 
