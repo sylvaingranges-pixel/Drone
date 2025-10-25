@@ -92,19 +92,19 @@ Matrix A:
 ### Control Accuracy
 
 #### Short Distance (<20m) ✅
-- Position errors: 0.3-1.5m (1.5-7.5%)
+- Position errors: 0.3-1.5m (1.5-7.5% of target distance)
 - Final velocities: 1.3-1.5 m/s
 - **Status**: Good performance
 
 #### Medium Distance (20-40m) ✅
-- Position errors: 1.8-2.0m (4-5%)
+- Position errors: 1.8-2.0m (4-5% of target distance)
 - Final velocities: 0.3-0.6 m/s
 - **Status**: Acceptable performance
 
 #### Long Distance (>40m) ⚠️
-- Position error: 11.6m (14.5%)
-- Final velocity: 12.2 m/s
-- **Status**: Significant deviations show linearization limits
+- Position error: 11.6m (14.5% of target distance)
+- Final velocity: 12.2 m/s (failure to achieve terminal constraint)
+- **Status**: Significant deviations, terminal constraints not met, demonstrates linearization limits
 
 ## Test Scenarios
 
