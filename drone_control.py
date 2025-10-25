@@ -8,6 +8,22 @@ carrying a suspended load (24kg) at 19m length. The system includes:
 - Linearized model around equilibrium
 - Discrete-time model (Ts=0.1s)
 - Optimal control using Model Predictive Control
+
+Key Observations:
+-----------------
+The optimal controller is designed based on the linearized model, which assumes
+small angles and no aerodynamic effects. When tested on the full non-linear model
+with aerodynamic drag, there is significant deviation, especially for larger 
+displacements. This demonstrates:
+
+1. The importance of model accuracy in control design
+2. The limitations of linearized control for systems with strong nonlinearities
+3. The need for robust control strategies or iterative approaches for better
+   performance on non-linear systems
+
+The comparison between linear and non-linear responses is educational and shows
+where linearization is valid (small angles, short distances) and where it breaks
+down (large angles, longer distances, aerodynamic effects).
 """
 
 import numpy as np
@@ -614,3 +630,46 @@ if __name__ == "__main__":
     print("\n" + "="*60)
     print("All scenarios completed!")
     print("="*60)
+    print("\n" + "="*60)
+    print("SUMMARY AND INSIGHTS")
+    print("="*60)
+    print("""
+The simulation demonstrates several key concepts in control theory:
+
+1. MODEL-BASED CONTROL:
+   - The optimal controller uses the linearized discrete-time model
+   - Control inputs are computed to minimize a cost function
+   - Terminal constraints ensure zero oscillation at arrival
+
+2. LINEAR VS NON-LINEAR BEHAVIOR:
+   - Linear model: Works well for the optimal trajectory (designed for it)
+   - Non-linear model: Shows significant deviation, especially for:
+     * Larger distances (40m, 80m)
+     * Higher velocities
+     * Presence of aerodynamic drag
+   
+3. WHY THE DIFFERENCE?
+   - Linearization assumes small angles (sin(θ) ≈ θ)
+   - Aerodynamic drag is velocity-squared, ignored in linearization
+   - The controller doesn't account for coupling between motion and drag
+   
+4. PRACTICAL IMPLICATIONS:
+   - For short distances (<20m) with slow motion: Linear controller adequate
+   - For longer distances: Need advanced techniques:
+     * Iterative linearization (MPC with re-planning)
+     * Direct non-linear optimization
+     * Robust control with uncertainty bounds
+     
+5. SYSTEM CHARACTERISTICS:
+   - Pendulum frequency: {:.3f} Hz
+   - Settling behavior depends on damping from drag
+   - Control authority limited by maximum acceleration
+   
+Generated plots show:
+- Row 1: Optimal planned trajectory (from optimization)
+- Row 2: Linear model response (discrete simulation)
+- Row 3: Non-linear model response (RK45 ODE solver)
+
+The comparison demonstrates where linear control is valid and where
+more sophisticated approaches are needed.
+""".format(np.sqrt(G/L) / (2*np.pi)))
