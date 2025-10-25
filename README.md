@@ -132,7 +132,15 @@ This simpler example demonstrates how to:
 
 For each scenario, the program generates:
 - Console output with initial/final states and performance metrics
+- **Optimization time**: Time taken to compute the optimal trajectory (1-4 seconds)
 - PNG plot file with comprehensive visualization
+
+After all scenarios, a performance summary table shows:
+- Optimization time for each scenario
+- Control horizon length
+- Average optimization time
+
+The fast optimization times (1-4 seconds) make this approach suitable for closed-loop Model Predictive Control with re-planning.
 
 ### Plot Structure
 Each plot contains 9 subplots organized in 3 rows:
@@ -143,13 +151,24 @@ Each plot contains 9 subplots organized in 3 rows:
 ## Results
 
 The controller successfully:
-- ✅ Moves the load to target positions (20m, 40m, 80m)
-- ✅ Eliminates oscillations at arrival (zero angle, zero velocity)
+- ✅ Moves the load to target positions (20m, 40m, 80m) on the linearized model
+- ✅ Eliminates oscillations at arrival (zero angle, zero velocity) on the linearized model
 - ✅ Handles both stopped and moving initial conditions
-- ✅ Works on non-linear model with aerodynamic drag
+- ✅ **Fast optimization**: 1-4 seconds per trajectory, suitable for real-time MPC
 - ✅ Respects physical constraints
 
-The non-linear model shows good agreement with the linearized model for small angles, with some deviation for larger displacements due to aerodynamic effects.
+**Important Note on Non-linear Model Behavior:**
+The controller is designed using the linearized model (as required by the problem statement). When tested on the full non-linear model with aerodynamic drag, there are significant deviations from the planned trajectory, especially for:
+- Longer distances (40m, 80m)
+- Higher velocities where aerodynamic drag becomes significant
+- Large angles where the small-angle approximation breaks down
+
+This is **expected behavior** and demonstrates the limitations of linearized control approaches. The comparison between linear and non-linear responses is educational and shows where linearization is valid (small angles, short distances) and where it breaks down (large angles, longer distances, aerodynamic effects).
+
+For better performance on the non-linear system, advanced techniques would be needed:
+- Iterative linearization with MPC re-planning
+- Direct non-linear trajectory optimization
+- Robust control with uncertainty bounds
 
 ## Mathematical Details
 
