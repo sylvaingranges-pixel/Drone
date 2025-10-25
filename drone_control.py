@@ -105,12 +105,16 @@ class DroneLoadSystem:
         
         return np.array([x_d_dot, v_d_dot, theta_dot, omega_dot])
     
-    def linearized_dynamics(self):
+    def linearized_dynamics(self, use_damping=False, damping_coeff=0.1):
         """
         Linearize system around equilibrium point:
         - Load directly below drone (theta = 0)
         - No velocity (v_d = 0, omega = 0)
         - No aerodynamic drag (v_l = 0)
+        
+        Args:
+            use_damping: if True, add artificial damping to approximate drag effects
+            damping_coeff: damping coefficient for velocity terms
         
         Returns:
             A, B: state-space matrices for continuous-time linear system
@@ -121,12 +125,21 @@ class DroneLoadSystem:
         # Small angle approximation: sin(theta) ≈ theta, cos(theta) ≈ 1
         
         # A matrix (4x4)
-        A = np.array([
-            [0, 1, 0, 0],           # x_d_dot = v_d
-            [0, 0, 0, 0],           # v_d_dot = u
-            [0, 0, 0, 1],           # theta_dot = omega
-            [0, 0, -self.g/self.L, 0]  # omega_dot = -g/L * theta - u/L
-        ])
+        if use_damping:
+            # Add damping terms to velocities
+            A = np.array([
+                [0, 1, 0, 0],           # x_d_dot = v_d
+                [0, -damping_coeff, 0, 0],  # v_d_dot = u - damping * v_d
+                [0, 0, 0, 1],           # theta_dot = omega
+                [0, 0, -self.g/self.L, -damping_coeff]  # omega_dot with damping
+            ])
+        else:
+            A = np.array([
+                [0, 1, 0, 0],           # x_d_dot = v_d
+                [0, 0, 0, 0],           # v_d_dot = u
+                [0, 0, 0, 1],           # theta_dot = omega
+                [0, 0, -self.g/self.L, 0]  # omega_dot = -g/L * theta - u/L
+            ])
         
         # B matrix (4x1)
         B = np.array([
@@ -206,7 +219,7 @@ class OptimalController:
         self.Ts = Ts
         
         # Get linearized discrete-time model
-        A_cont, B_cont, self.C = system.linearized_dynamics()
+        A_cont, B_cont, self.C = system.linearized_dynamics(use_damping=False)
         self.Ad, self.Bd = system.discretize(A_cont, B_cont, Ts)
         
         # Performance metrics
@@ -236,11 +249,11 @@ class OptimalController:
         x = cp.Variable((n, N_horizon + 1))
         u = cp.Variable((m, N_horizon))
         
-        # Cost function weights - tuned for slower, more controlled motion
-        # Higher terminal penalties ensure precise final conditions
-        Q_final = np.diag([10000.0, 1000.0, 5000.0, 1000.0])  # Increased final state penalty
-        R = np.diag([0.1])  # Increased control penalty for smoother motion
-        Q_running = np.diag([10.0, 1.0, 100.0, 50.0])  # Increased running penalties
+        # Cost function weights - tuned for slower, more controlled motion to handle drag
+        # Much higher penalties to enforce very conservative behavior
+        Q_final = np.diag([20000.0, 2000.0, 10000.0, 2000.0])  # Very high final state penalty
+        R = np.diag([0.5])  # High control penalty for very smooth motion
+        Q_running = np.diag([50.0, 10.0, 200.0, 100.0])  # High running penalties
         
         # Target state (load at x_target, all velocities zero, drone above load)
         x_ref = np.array([x_target, 0.0, 0.0, 0.0])
@@ -266,14 +279,14 @@ class OptimalController:
         for k in range(N_horizon):
             constraints.append(x[:, k+1] == self.Ad @ x[:, k] + self.Bd @ u[:, k])
         
-        # Control constraints - reduced for gentler motion
-        u_max_actual = min(u_max, 3.0)  # Limit to 3 m/s² for smoother operation
+        # Control constraints - very conservative for handling drag
+        u_max_actual = min(u_max, 2.0)  # Limit to 2 m/s² for very smooth operation
         for k in range(N_horizon):
             constraints.append(u[:, k] <= u_max_actual)
             constraints.append(u[:, k] >= -u_max_actual)
         
-        # Angle constraints (safety)
-        max_angle = np.pi/6  # 30 degrees max
+        # Angle constraints (safety) - more conservative
+        max_angle = np.pi/10  # 18 degrees max for better linearization validity
         for k in range(N_horizon + 1):
             constraints.append(x[2, k] <= max_angle)
             constraints.append(x[2, k] >= -max_angle)
@@ -286,11 +299,11 @@ class OptimalController:
         
         # Add constraints to ensure smooth deceleration near the end
         # Velocity should decrease in the last portion
-        for k in range(int(N_horizon * 0.8), N_horizon):
-            # Gradually decrease maximum allowed velocity
-            progress = (k - int(N_horizon * 0.8)) / (N_horizon - int(N_horizon * 0.8))
-            v_max = 1.0 * (1 - progress)  # Linearly decrease to 0
-            constraints.append(cp.abs(x[1, k]) <= v_max + 0.1)
+        for k in range(int(N_horizon * 0.7), N_horizon):
+            # Gradually decrease maximum allowed velocity earlier
+            progress = (k - int(N_horizon * 0.7)) / (N_horizon - int(N_horizon * 0.7))
+            v_max = 0.5 * (1 - progress)  # Linearly decrease to 0, max 0.5 m/s
+            constraints.append(cp.abs(x[1, k]) <= v_max + 0.05)
         
         # Solve optimization problem
         problem = cp.Problem(cp.Minimize(cost), constraints)
@@ -699,37 +712,37 @@ if __name__ == "__main__":
     print(f"Ad matrix:\n{Ad}")
     print(f"\nBd matrix:\n{Bd}")
     
-    # Test scenarios - with longer horizons for better settling
+    # Test scenarios - balanced horizons for demonstration
     scenarios = [
         {
             'name': 'Stopped start, 20m target',
             'x0': np.array([0.0, 0.0, 0.0, 0.0]),
             'x_target': 20.0,
-            'N': 300  # Longer horizon for better settling
+            'N': 400  
         },
         {
             'name': 'Stopped start, 40m target',
             'x0': np.array([0.0, 0.0, 0.0, 0.0]),
             'x_target': 40.0,
-            'N': 500
+            'N': 600
         },
         {
             'name': 'Stopped start, 80m target',
             'x0': np.array([0.0, 0.0, 0.0, 0.0]),
             'x_target': 80.0,
-            'N': 800
+            'N': 1000
         },
         {
             'name': 'Moving start, 20m target',
             'x0': np.array([0.0, 2.0, 0.05, 0.0]),  # v_d=2m/s, theta=~3deg
             'x_target': 20.0,
-            'N': 300
+            'N': 400
         },
         {
             'name': 'Moving start, 40m target',
             'x0': np.array([0.0, 1.5, -0.05, 0.02]),  # v_d=1.5m/s, theta=-3deg, omega=0.02rad/s
             'x_target': 40.0,
-            'N': 500
+            'N': 600
         },
     ]
     
