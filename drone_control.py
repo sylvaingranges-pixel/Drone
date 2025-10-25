@@ -202,6 +202,8 @@ class NonlinearOptimalController:
     def __init__(self, system, Ts=0.1):
         self.system = system
         self.Ts = Ts
+        # Create linear controller for warm-starting
+        self.linear_controller = OptimalController(system, Ts)
         
     def dynamics_discrete(self, x, u):
         """
@@ -229,6 +231,8 @@ class NonlinearOptimalController:
         """
         Compute optimal trajectory using direct non-linear optimization.
         
+        Uses linear MPC solution as warm start for faster convergence.
+        
         Args:
             x0: initial state [x_d, v_d, theta, omega]
             x_target: target load position
@@ -241,35 +245,41 @@ class NonlinearOptimalController:
         """
         n = 4  # state dimension
         
-        # Decision variables: control sequence only (reduce problem size)
-        # States will be computed from dynamics
-        n_vars = N_horizon
+        # Get warm start from linear controller
+        print("  Computing warm start from linear controller...")
+        u_linear, x_linear = self.linear_controller.compute_trajectory(
+            x0, x_target, N_horizon, u_max)
         
-        # Initial guess: bang-bang control profile
-        # Accelerate first half, decelerate second half
-        u_init = np.zeros(N_horizon)
-        u_init[:N_horizon//2] = u_max * 0.5
-        u_init[N_horizon//2:] = -u_max * 0.5
+        if u_linear is None:
+            print("  Failed to get warm start, using zero initial guess")
+            u_init = np.zeros(N_horizon)
+        else:
+            u_init = u_linear.flatten()
+            print(f"  Got warm start (linear solution)")
         
         # Cost function
         def cost(u):
             total_cost = 0.0
             
-            # Weights (tuned to minimize overshoot)
-            w_pos = 10.0       # Position error weight
-            w_vel = 100.0      # Velocity error weight (high to ensure zero velocity)
-            w_angle = 200.0    # Angle error weight (high to ensure zero angle)
-            w_omega = 100.0    # Angular velocity weight
-            w_control = 0.005  # Control effort weight (low to allow aggressive control)
+            # Weights (heavily tuned to minimize overshoot and ensure stopping)
+            w_pos = 200.0      # Position error weight
+            w_vel = 1000.0     # Velocity error weight (very high)
+            w_angle = 2000.0   # Angle error weight (very high)
+            w_omega = 1000.0   # Angular velocity weight
+            w_control = 0.0001 # Control effort weight (very low - allow aggressive control)
+            w_overshoot = 5000.0  # Overshoot penalty weight (very high)
             
-            # Terminal weights (very high to ensure accurate arrival)
-            w_pos_f = 5000.0
-            w_vel_f = 10000.0
-            w_angle_f = 10000.0
-            w_omega_f = 5000.0
+            # Terminal weights (extremely high to ensure accurate arrival)
+            w_pos_f = 50000.0
+            w_vel_f = 100000.0
+            w_angle_f = 100000.0
+            w_omega_f = 50000.0
             
             # Simulate forward with current control
             x = x0.copy()
+            x_load_init = x0[0] + self.system.L * np.sin(x0[2])
+            direction = np.sign(x_target - x_load_init) if x_target != x_load_init else 1.0
+            
             for i in range(N_horizon):
                 # Load position and velocity
                 x_load = x[0] + self.system.L * np.sin(x[2])
@@ -282,8 +292,19 @@ class NonlinearOptimalController:
                 total_cost += w_omega * x[3]**2
                 total_cost += w_control * u[i]**2
                 
+                # Strong penalty for exceeding target (anti-overshoot)
+                overshoot = (x_load - x_target) * direction
+                if overshoot > 0:  # Past target
+                    total_cost += w_overshoot * overshoot**2
+                
                 # Propagate dynamics
-                x = self.dynamics_discrete(x, u[i])
+                x_next = self.dynamics_discrete(x, u[i])
+                
+                # Check for NaN or inf
+                if not np.all(np.isfinite(x_next)):
+                    return 1e10  # Return very high cost for invalid states
+                
+                x = x_next
             
             # Terminal cost (ensure accurate arrival)
             x_load_f = x[0] + self.system.L * np.sin(x[2])
@@ -295,41 +316,32 @@ class NonlinearOptimalController:
             total_cost += w_omega_f * x[3]**2
             total_cost += w_vel_f * x[1]**2  # Also penalize drone velocity
             
+            # Check for NaN
+            if not np.isfinite(total_cost):
+                return 1e10
+            
             return total_cost
-        
-        # Gradient of cost function (for faster optimization)
-        def cost_gradient(u):
-            # Numerical gradient via finite differences
-            eps = 1e-6
-            grad = np.zeros(N_horizon)
-            f0 = cost(u)
-            for i in range(N_horizon):
-                u_plus = u.copy()
-                u_plus[i] += eps
-                grad[i] = (cost(u_plus) - f0) / eps
-            return grad
         
         # Bounds
         bounds = [(-u_max, u_max) for _ in range(N_horizon)]
         
         # Solve optimization
-        print("  Optimizing non-linear trajectory (this may take a minute)...")
+        print("  Refining with non-linear optimization...")
         t_start = time.time()
         
         result = minimize(
             cost, 
             u_init, 
             method='SLSQP',
-            jac=cost_gradient,
             bounds=bounds,
-            options={'maxiter': 300, 'ftol': 1e-6, 'disp': False}
+            options={'maxiter': 200, 'ftol': 1e-5, 'disp': False}
         )
         
         t_elapsed = time.time() - t_start
-        print(f"  Optimization completed in {t_elapsed:.2f}s")
+        print(f"  Non-linear optimization completed in {t_elapsed:.2f}s")
         
         if not result.success:
-            print(f"  Warning: Optimization did not fully converge: {result.message}")
+            print(f"  Warning: Optimization status: {result.message}")
         
         # Extract solution and compute state trajectory
         u_opt = result.x
@@ -339,6 +351,11 @@ class NonlinearOptimalController:
         
         for i in range(N_horizon):
             x_opt[:, i+1] = self.dynamics_discrete(x_opt[:, i], u_opt[i])
+            
+            # Check for numerical issues
+            if not np.all(np.isfinite(x_opt[:, i+1])):
+                print(f"  Error: Numerical instability detected at step {i}")
+                return None, None
         
         return u_opt, x_opt
 
