@@ -142,14 +142,51 @@ Each plot contains 9 subplots organized in 3 rows:
 
 ## Results
 
-The controller successfully:
-- ✅ Moves the load to target positions (20m, 40m, 80m)
-- ✅ Eliminates oscillations at arrival (zero angle, zero velocity)
-- ✅ Handles both stopped and moving initial conditions
-- ✅ Works on non-linear model with aerodynamic drag
-- ✅ Respects physical constraints
+### Performance Metrics
 
-The non-linear model shows good agreement with the linearized model for small angles, with some deviation for larger displacements due to aerodynamic effects.
+#### Computation Time
+The optimal trajectory calculation time varies with horizon length:
+- **20m targets**: ~5-6 seconds (N=400 steps, 40s horizon)
+- **40m targets**: ~8-9 seconds (N=600 steps, 60s horizon)
+- **80m target**: ~15-16 seconds (N=1000 steps, 100s horizon)
+
+Computation times include convex optimization problem formulation, OSQP solver execution, and constraint satisfaction checking. These times are fast enough for offline trajectory planning or slow-rate MPC applications.
+
+#### Control Performance
+
+**Short Distance (20m targets):**
+- Stopped start: 1.48m position error (7.4%), 1.45 m/s final velocity
+- Moving start: 0.30m position error (1.5%), 1.34 m/s final velocity
+- Assessment: ✅ Good tracking on both linear and non-linear models
+
+**Medium Distance (40m targets):**
+- Stopped start: 1.76m position error (4.4%), 0.55 m/s final velocity
+- Moving start: 1.99m position error (5.0%), 0.25 m/s final velocity  
+- Assessment: ✅ Acceptable performance with moderate deviations
+
+**Long Distance (80m target):**
+- Stopped start: 11.62m position error (14.5%), 12.15 m/s final velocity
+- Assessment: ⚠️ Significant deviation demonstrates linearization limits
+
+### Controller Capabilities
+
+The controller successfully:
+- ✅ Computes optimal trajectories in 5-16 seconds
+- ✅ Moves the load toward target positions
+- ✅ Minimizes oscillations on the linear model
+- ✅ Handles both stopped and moving initial conditions
+- ✅ Respects physical constraints (acceleration, angle limits)
+- ⚠️ Shows deviations on non-linear model due to unmodeled drag effects
+
+### Key Insights
+
+1. **Computation Speed**: Trajectories computed in 5-16s, suitable for planning applications
+2. **Short Distances**: Linear controller performs well for <20m (errors <2m)
+3. **Medium Distances**: Reasonable performance for 20-40m (errors ~2m)
+4. **Long Distances**: Linearization breaks down for >40m (errors >10m)
+5. **Aerodynamic Effects**: Velocity-squared drag not captured by linearization causes the main deviations
+
+The non-linear model shows reasonable agreement with the linearized model for short distances and small angles, with increasing deviation for larger displacements due to aerodynamic effects and linearization errors.
 
 ## Mathematical Details
 
@@ -196,6 +233,45 @@ B = [  0  ]
 C = [1  0   L   0]
     [0  1   0   L]
 ```
+
+## Limitations and Future Work
+
+### Current Limitations
+
+1. **Linearization Validity**: The controller is based on a linearized model that assumes:
+   - Small angles (sin(θ) ≈ θ, cos(θ) ≈ 1)
+   - No aerodynamic drag
+   - These assumptions break down for:
+     - Large displacements (>40m)
+     - High velocities (>2 m/s)
+     - Long cable lengths
+
+2. **Drag Effects**: The aerodynamic drag (F = 0.5 * ρ * Cd * S * v²) is:
+   - Velocity-squared nonlinearity
+   - Not modeled in the linearized controller
+   - Causes significant deviations, especially at higher speeds
+
+3. **Terminal Constraints**: While the linear model satisfies terminal constraints (zero velocity, zero angle), the non-linear model shows residual motion due to model mismatch.
+
+### Potential Improvements
+
+To achieve better performance on the non-linear system:
+
+1. **Iterative MPC**: Re-linearize and re-optimize at each time step based on actual state
+2. **Non-linear MPC**: Use sequential convex programming or direct collocation
+3. **Robust Control**: Design controller accounting for model uncertainty bounds
+4. **Adaptive Control**: Online parameter estimation and controller adaptation
+5. **Feedforward Compensation**: Add drag compensation term based on estimated velocity
+6. **Longer Settling Times**: Use much longer horizons (>100s) for gentler trajectories
+
+### Educational Value
+
+This implementation demonstrates:
+- ✅ Complete model-based control pipeline (modeling → optimization → validation)
+- ✅ Linearization techniques and their practical limits
+- ✅ Trade-offs between model complexity and control performance
+- ✅ Importance of model fidelity for successful control
+- ✅ When simple linear control is sufficient and when advanced techniques are needed
 
 ## License
 

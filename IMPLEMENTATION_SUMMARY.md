@@ -81,6 +81,31 @@ Matrix A:
 - Linear model: Discrete-time simulation
 - Non-linear model: RK45 ODE solver with piecewise constant control
 
+## Performance Summary
+
+### Computation Speed ✅
+- **20m targets**: 5-6 seconds
+- **40m targets**: 8-9 seconds  
+- **80m target**: 15-16 seconds
+- **Assessment**: Fast enough for offline planning or slow-rate MPC
+
+### Control Accuracy
+
+#### Short Distance (<20m) ✅
+- Position errors: 0.3-1.5m (1.5-7.5%)
+- Final velocities: 1.3-1.5 m/s
+- **Status**: Good performance
+
+#### Medium Distance (20-40m) ✅
+- Position errors: 1.8-2.0m (4-5%)
+- Final velocities: 0.3-0.6 m/s
+- **Status**: Acceptable performance
+
+#### Long Distance (>40m) ⚠️
+- Position error: 11.6m (14.5%)
+- Final velocity: 12.2 m/s
+- **Status**: Significant deviations show linearization limits
+
 ## Test Scenarios
 
 1. **Stopped start → 20m**: Basic scenario from rest
@@ -91,23 +116,27 @@ Matrix A:
 
 ## Key Results
 
-### Performance
-- ✓ All scenarios compute optimal trajectories successfully
-- ✓ Linear model tracks optimal trajectory closely
-- ✓ Non-linear model shows expected deviations due to:
-  - Aerodynamic drag effects
-  - Large angle deviations from linearization
-  - Velocity-squared drag coupling
+### Achievements ✅
+- ✓ All scenarios compute optimal trajectories in 5-16 seconds
+- ✓ Linear model tracks optimal trajectory accurately
+- ✓ Short distance control (<20m) works well with <2m errors
+- ✓ Medium distance control (20-40m) shows acceptable ~2m errors
+- ✓ All required test scenarios completed
+- ✓ Comprehensive visualization generated
 
-### Insights
-1. **Short distances (<20m)**: Linear control performs adequately
-2. **Medium distances (20-40m)**: Noticeable but manageable deviation
-3. **Long distances (>40m)**: Significant deviation, requires advanced techniques
+### Challenges Identified ⚠️
+- Non-linear model shows deviations due to:
+  - Aerodynamic drag effects (velocity-squared)
+  - Large angle deviations from linearization (sin(θ) ≈ θ fails)
+  - Velocity-drag coupling not modeled
+- Long distances (>40m) show >10m errors
+- Perfect stopping not achieved on non-linear model
 
-### System Characteristics
-- Pendulum frequency: 0.114 Hz
-- Linearization valid for angles < 15-20°
-- Aerodynamic effects significant at velocities > 2 m/s
+### Educational Insights 📚
+1. **Model-based control works** when model matches reality
+2. **Linearization valid** for small angles and short distances
+3. **Aerodynamic effects significant** at velocities > 2 m/s
+4. **Trade-offs**: Simple linear control vs. complex non-linear methods
 
 ## Code Quality
 
@@ -161,14 +190,37 @@ Potential improvements for better non-linear performance:
 
 ## Conclusion
 
-The implementation successfully fulfills all requirements:
-- ✓ Non-linear model with aerodynamic drag
-- ✓ Linearized model
-- ✓ Discrete-time model
-- ✓ Optimal controller using CVXPY
+The implementation successfully fulfills the core requirements:
+- ✓ Non-linear model with aerodynamic drag (F = 0.5 * ρ * Cd * S * v²)
+- ✓ Linearized model around equilibrium
+- ✓ Discrete-time model (Ts=0.1s)
+- ✓ Optimal controller using CVXPY convex optimization
 - ✓ RK45 ODE solver validation
-- ✓ Comprehensive visualization
-- ✓ Multiple test scenarios
-- ✓ Educational insights
+- ✓ Comprehensive visualization and plots
+- ✓ Multiple test scenarios (stopped/moving start, 20/40/80m targets)
+- ✓ Execution speed verification (5-16 seconds)
 
-The system provides a solid foundation for understanding drone control with suspended loads and demonstrates both the power and limitations of linearized control approaches.
+### Performance Assessment
+
+**Strengths:**
+- Fast trajectory computation (suitable for planning applications)
+- Good performance on short distances (<20m)
+- Demonstrates complete control pipeline
+- Educational value in showing linearization trade-offs
+
+**Limitations:**
+- Non-linear model deviations increase with distance
+- Perfect stopping not achieved on non-linear system
+- Aerodynamic drag effects not captured in linear controller
+- Long distance control (>40m) requires advanced techniques
+
+### Educational Value
+
+This system provides an excellent foundation for:
+1. Understanding model-based optimal control
+2. Learning linearization techniques and their limits
+3. Appreciating the importance of model fidelity
+4. Recognizing when simple methods work and when sophistication is needed
+5. Practicing with real optimization tools (CVXPY, OSQP)
+
+The comparison between linear and non-linear responses clearly demonstrates where linearized control is appropriate and where more advanced techniques (iterative MPC, non-linear MPC, robust control) become necessary.
